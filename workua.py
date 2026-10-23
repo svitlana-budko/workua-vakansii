@@ -1,6 +1,6 @@
 """Збирає вакансії з work.ua справжнім браузером (Cloudflare пропускає після першого виклику).
 Результат: data/workua.json — список вакансій зі списку + повний опис зі сторінки вакансії."""
-import asyncio, json, re, datetime, urllib.parse, pathlib
+import asyncio, json, re, datetime, urllib.parse, pathlib, random, tempfile
 from playwright.async_api import async_playwright
 
 import sys
@@ -25,7 +25,8 @@ PROFILES = {
 }
 PROFILE = sys.argv[1] if len(sys.argv) > 1 else "maryna"
 LISTS, OUT_NAME = PROFILES[PROFILE]
-MAX_DETAILS = 300
+MAX_DETAILS = 150
+MAX_RESTARTS = 6
 OUT = pathlib.Path(OUT_NAME)
 
 async def open_page(pg, url, tries=3):
@@ -57,35 +58,94 @@ DETAIL_JS = """() => {
           closed: /вакансі[яю] (в архіві|закрит|неактивн)/i.test(document.body.innerText.slice(0, 4000))};
 }"""
 
+class Browser:
+    """Справжній Chrome у віконному режимі (xvfb). Коли Cloudflare починає блокувати,
+    браузер перезапускається з чистим профілем — свіжа сесія зазвичай знову проходить."""
+    def __init__(self, p):
+        self.p, self.ctx, self.pg, self.restarts = p, None, None, 0
+
+    async def start(self):
+        if self.ctx:
+            await self.ctx.close()
+        self.ctx = await self.p.chromium.launch_persistent_context(
+            tempfile.mkdtemp(prefix="chrome-"), channel="chrome", headless=False, locale="uk-UA",
+            args=["--disable-blink-features=AutomationControlled"])
+        await self.ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        self.pg = self.ctx.pages[0] if self.ctx.pages else await self.ctx.new_page()
+        await open_page(self.pg, "https://www.work.ua/", tries=2)  # прогрів: тут Cloudflare видає cookie
+
+    async def get(self, url):
+        if await open_page(self.pg, url, tries=2):
+            return True
+        if self.restarts >= MAX_RESTARTS:
+            return False
+        self.restarts += 1
+        await asyncio.sleep(random.uniform(20, 40))
+        await self.start()
+        return await open_page(self.pg, url, tries=2)
+
+    async def pause(self, lo, hi):
+        await self.pg.wait_for_timeout(int(random.uniform(lo, hi) * 1000))
+
+
+def load_previous():
+    try:
+        return json.loads(OUT.read_text())
+    except Exception:
+        return None
+
+
+def ok_share(d):
+    return sum(1 for l in d["lists"] if l["ok"]) / max(len(d["lists"]), 1) if d else 0
+
+
 async def main():
-    started = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    started = datetime.datetime.utcnow()
+    prev = load_previous()
+    if prev and "--force" not in sys.argv and prev["generated_at"][:10] == started.date().isoformat() and ok_share(prev) >= 0.9:
+        print("сьогоднішній файл уже повний — пропускаю"); return
+    # описи, які вже відкривали за останні 3 дні, не тягнемо вдруге — менше запитів, менше блокувань
+    known = {}
+    if prev and (started - datetime.datetime.fromisoformat(prev["generated_at"].rstrip("Z"))).days < 3:
+        known = {j["url"]: j for j in prev["jobs"] if j.get("detail_ok")}
     jobs, log = {}, []
     async with async_playwright() as p:
-        # справжній Chrome у віконному режимі (xvfb): headless Cloudflare блокує вже з другої сторінки
-        ctx = await p.chromium.launch_persistent_context("/tmp/chrome-profile", channel="chrome", headless=False,
-                                                         locale="uk-UA", args=["--disable-blink-features=AutomationControlled"])
-        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        pg = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await open_page(pg, "https://www.work.ua/", tries=2)  # прогрів: тут Cloudflare видає cookie
+        b = Browser(p)
+        await b.start()
         for url in LISTS:
-            ok = await open_page(pg, url)
-            cards = await pg.evaluate(CARDS_JS) if ok else []
+            ok = await b.get(url)
+            cards = await b.pg.evaluate(CARDS_JS) if ok else []
             for c in cards:
                 c.setdefault("found_by", [])
                 jobs.setdefault(c["url"], c)["found_by"].append(url)
             log.append({"list": url, "ok": ok, "cards": len(cards)})
-            await pg.wait_for_timeout(3000)
-        for i, (u, j) in enumerate(list(jobs.items())[:MAX_DETAILS]):
-            if await open_page(pg, u, tries=2):
-                j.update(await pg.evaluate(DETAIL_JS)); j["detail_ok"] = True
+            await b.pause(4, 8)
+        fetched = 0
+        for u, j in jobs.items():
+            if u in known:
+                j.update({k: known[u][k] for k in ("h1", "description", "header", "closed", "detail_ok") if k in known[u]})
+                continue
+            if fetched >= MAX_DETAILS:
+                j["detail_ok"] = False
+                continue
+            fetched += 1
+            if await b.get(u):
+                j.update(await b.pg.evaluate(DETAIL_JS)); j["detail_ok"] = True
             else:
                 j["detail_ok"] = False
-            await pg.wait_for_timeout(2500)
-        await ctx.close()
-    OUT.parent.mkdir(exist_ok=True)
-    OUT.write_text(json.dumps({"generated_at": started, "lists": log, "count": len(jobs),
-                               "jobs": list(jobs.values())}, ensure_ascii=False, indent=1))
+            await b.pause(2.5, 5)
+        await b.ctx.close()
+    new = {"generated_at": started.isoformat(timespec="seconds") + "Z", "lists": log, "count": len(jobs),
+           "restarts": b.restarts, "jobs": list(jobs.values())}
     print(json.dumps(log, ensure_ascii=False, indent=1))
-    print("jobs", len(jobs), "details ok", sum(1 for j in jobs.values() if j.get("detail_ok")))
+    print("jobs", len(jobs), "details ok", sum(1 for j in jobs.values() if j.get("detail_ok")), "restarts", b.restarts)
+    # гірший прохід не затирає кращий свіжий: агент краще прочитає вчорашній повний файл, ніж сьогоднішні уламки
+    if prev and ok_share(new) < ok_share(prev) and ok_share(new) < 0.6 and \
+            (started - datetime.datetime.fromisoformat(prev["generated_at"].rstrip("Z"))).total_seconds() < 36 * 3600:
+        prev["last_failed_attempt"] = new["generated_at"]
+        OUT.write_text(json.dumps(prev, ensure_ascii=False, indent=1))
+        print("прохід гірший за попередній — залишаю попередній файл"); return
+    OUT.parent.mkdir(exist_ok=True)
+    OUT.write_text(json.dumps(new, ensure_ascii=False, indent=1))
 
 asyncio.run(main())

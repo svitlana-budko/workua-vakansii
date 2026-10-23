@@ -1,20 +1,32 @@
 name: workua
 on:
   workflow_dispatch:
+    inputs:
+      force:
+        description: "Перезібрати, навіть якщо сьогоднішній файл повний"
+        type: boolean
+        default: false
   schedule:
-    - cron: "15 4 * * *"   # щодня 04:15 UTC, за 45 хв до хмарного агента
+    # кілька спроб за ніч: Cloudflare інколи блокує прохід, а повний файл потрібен до 05:00 UTC.
+    # Якщо сьогоднішній файл уже повний, наступні спроби одразу виходять.
+    - cron: "40 1 * * *"
+    - cron: "40 2 * * *"
+    - cron: "30 3 * * *"
+    - cron: "20 4 * * *"
 permissions:
   contents: write
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 100
+    timeout-minutes: 120
+    env:
+      FORCE: ${{ inputs.force && '--force' || '' }}
     steps:
       - uses: actions/checkout@v4
       - run: pip install playwright && python -m playwright install-deps chromium
-      - run: xvfb-run -a python workua.py maryna
+      - run: xvfb-run -a python workua.py maryna $FORCE
         continue-on-error: true
-      - run: xvfb-run -a python workua.py svitlana
+      - run: xvfb-run -a python workua.py svitlana $FORCE
         continue-on-error: true
       - run: |
           git config user.name "workua-bot"; git config user.email "actions@users.noreply.github.com"
