@@ -3,14 +3,30 @@
 import asyncio, json, re, datetime, urllib.parse, pathlib
 from playwright.async_api import async_playwright
 
-QUERIES = ["account manager", "key account manager", "customer success", "менеджер по роботі з клієнтами",
-           "ключовими клієнтами", "супровід клієнтів", "тендер", "закупівель", "операційний менеджер",
-           "договірної роботи", "retention", "менеджер з розвитку", "бізнес-аналітик", "документообіг",
-           "партнерами", "crm"]
-LISTS = [f"https://www.work.ua/jobs-remote-{urllib.parse.quote(q.replace(' ', '+'), safe='+')}/" for q in QUERIES]
-LISTS += ["https://www.work.ua/jobs-kostopil/", "https://www.work.ua/jobs-rivne-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80/"]
+import sys
+
+def remote(qs):
+    return [f"https://www.work.ua/jobs-remote-{urllib.parse.quote(q.replace(' ', '+'), safe='+')}/" for q in qs]
+
+# Профілі: maryna — робота з клієнтами, тендери, операційка (+ Костопіль і Рівне);
+# svitlana — керівник продажів, growth, RevOps, навчання продажників (лише віддалено).
+PROFILES = {
+    "maryna": (remote(["account manager", "key account manager", "customer success", "менеджер по роботі з клієнтами",
+                       "ключовими клієнтами", "супровід клієнтів", "тендер", "закупівель", "операційний менеджер",
+                       "договірної роботи", "retention", "менеджер з розвитку", "бізнес-аналітик", "документообіг",
+                       "партнерами", "crm"])
+               + ["https://www.work.ua/jobs-kostopil/", "https://www.work.ua/jobs-rivne-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80/"],
+               "data/workua.json"),
+    "svitlana": (remote(["head of sales", "керівник відділу продажів", "комерційний директор", "директор з продажу",
+                         "sales director", "sales team lead", "growth", "revops", "sales operations", "retention",
+                         "crm маркетолог", "customer success lead", "тренер з продажу", "керівник відділу по роботі з клієнтами",
+                         "chief revenue officer", "e-commerce manager"]),
+                 "data/workua_svitlana.json"),
+}
+PROFILE = sys.argv[1] if len(sys.argv) > 1 else "maryna"
+LISTS, OUT_NAME = PROFILES[PROFILE]
 MAX_DETAILS = 300
-OUT = pathlib.Path("data/workua.json")
+OUT = pathlib.Path(OUT_NAME)
 
 async def open_page(pg, url, tries=3):
     for _ in range(tries):

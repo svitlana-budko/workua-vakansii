@@ -8,11 +8,14 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
       - run: pip install playwright && python -m playwright install-deps chromium
-      - run: xvfb-run -a python workua.py
+      - run: xvfb-run -a python workua.py maryna
+        continue-on-error: true
+      - run: xvfb-run -a python workua.py svitlana
+        continue-on-error: true
       - run: |
           git config user.name "workua-bot"; git config user.email "actions@users.noreply.github.com"
-          git add data/workua.json && git commit -m "work.ua $(date -u +%F)" && git push || echo "без змін"
+          git add data/ && git commit -m "work.ua $(date -u +%F)" && git push || echo "без змін"
