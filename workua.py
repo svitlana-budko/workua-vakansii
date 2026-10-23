@@ -9,7 +9,7 @@ QUERIES = ["account manager", "key account manager", "customer success", "мен
            "партнерами", "crm"]
 LISTS = [f"https://www.work.ua/jobs-remote-{urllib.parse.quote(q.replace(' ', '+'), safe='+')}/" for q in QUERIES]
 LISTS += ["https://www.work.ua/jobs-kostopil/", "https://www.work.ua/jobs-rivne-%D0%BC%D0%B5%D0%BD%D0%B5%D0%B4%D0%B6%D0%B5%D1%80/"]
-MAX_DETAILS = 120
+MAX_DETAILS = 300
 OUT = pathlib.Path("data/workua.json")
 
 async def open_page(pg, url, tries=3):
