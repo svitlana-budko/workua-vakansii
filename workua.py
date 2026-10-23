@@ -16,10 +16,10 @@ async def open_page(pg, url, tries=3):
     for _ in range(tries):
         try:
             r = await pg.goto(url, wait_until="domcontentloaded", timeout=45000)
-            for _ in range(15):
+            for _ in range(20):
                 if "moment" not in (await pg.title()).lower():
                     break
-                await pg.wait_for_timeout(2000)
+                await pg.wait_for_timeout(1500)
             if r and r.status == 200 or "moment" not in (await pg.title()).lower() and await pg.query_selector("h1"):
                 return True
         except Exception:
@@ -45,9 +45,11 @@ async def main():
     started = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
     jobs, log = {}, []
     async with async_playwright() as p:
-        b = await p.chromium.launch(headless=True, args=["--disable-blink-features=AutomationControlled"])
-        ctx = await b.new_context(locale="uk-UA", user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
-        pg = await ctx.new_page()
+        # справжній Chrome у віконному режимі (xvfb): headless Cloudflare блокує вже з другої сторінки
+        ctx = await p.chromium.launch_persistent_context("/tmp/chrome-profile", channel="chrome", headless=False,
+                                                         locale="uk-UA", args=["--disable-blink-features=AutomationControlled"])
+        await ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        pg = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await open_page(pg, "https://www.work.ua/", tries=2)  # прогрів: тут Cloudflare видає cookie
         for url in LISTS:
             ok = await open_page(pg, url)
@@ -56,14 +58,14 @@ async def main():
                 c.setdefault("found_by", [])
                 jobs.setdefault(c["url"], c)["found_by"].append(url)
             log.append({"list": url, "ok": ok, "cards": len(cards)})
-            await pg.wait_for_timeout(1500)
+            await pg.wait_for_timeout(3000)
         for i, (u, j) in enumerate(list(jobs.items())[:MAX_DETAILS]):
             if await open_page(pg, u, tries=2):
                 j.update(await pg.evaluate(DETAIL_JS)); j["detail_ok"] = True
             else:
                 j["detail_ok"] = False
-            await pg.wait_for_timeout(1200)
-        await b.close()
+            await pg.wait_for_timeout(2500)
+        await ctx.close()
     OUT.parent.mkdir(exist_ok=True)
     OUT.write_text(json.dumps({"generated_at": started, "lists": log, "count": len(jobs),
                                "jobs": list(jobs.values())}, ensure_ascii=False, indent=1))
